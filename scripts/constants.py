@@ -1,4 +1,4 @@
-PATH = './'
+PATH = '/home/bioinfo202200130041/final_project/data'
 MAX_NODE_FEA = 36
 MAX_EDGE_FEA = [3,2,1]
 YMIN = 0.3755

@@ -1,0 +1,73 @@
+# 数据集文件
+*.h5
+*.hdf5
+*.npy
+*.npz
+*.pkl
+*.pickle
+*.pt
+*.pth
+*.bin
+*.ckpt
+*.tar
+*.gz
+*.zip
+
+# 日志和输出
+logs/
+output/
+results/
+checkpoints/
+lightning_logs/
+wandb/
+
+# 训练相关
+*.log
+tensorboard/
+runs/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.ipynb_checkpoints/
+
+# 环境
+.env
+.venv
+env/
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统
+.DS_Store
+Thumbs.db
+# 模型检查点和权重文件
+*.ckpt
+*.pth
+*.pt
+*.bin
+*.safetensors
+
+# 训练日志
+lightning_logs/
+logs/
+wandb/
+tensorboard/
+
+# PyTorch Lightning 相关
+checkpoints/
+scripts/lightning_logs/
+*.ckpt
+*.pdf

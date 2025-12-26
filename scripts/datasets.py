@@ -1,12 +1,29 @@
-from ogb.utils import smiles2graph
+# from ogb.utils import smiles2graph
+import numpy as np
+from ogb.utils.mol import smiles2graph
 from ogb.lsc import PygPCQM4Mv2Dataset
 from torch_geometric.loader import DataLoader
 import torch
 from tqdm import tqdm
 
+def safe_smiles2graph(smiles):
+    try:
+        return smiles2graph(smiles)
+    except AttributeError:
+        # 如果遇到坏分子导致 RDKit 返回 None，就会触发这个错误
+        # 我们返回一个只有一个孤立节点的“哑图”，保持数据对齐
+        return {
+            'edge_index': np.empty((2, 0), dtype=np.int64),
+            'edge_feat': np.empty((0, 3), dtype=np.int64),
+            'node_feat': np.zeros((1, 9), dtype=np.int64),
+            'num_nodes': 1
+        }
+
+# PCQM4Mv2 数据集中包含了极少数（大约 370 万个中的几个）化学结构“不规范”的分子
+# 新版的rdkit无法处理这些分子 修改 smiles2graph 函数
 
 def get_ds(root, use_kfold=False, fold=None):
-    pyg_dataset = PygPCQM4Mv2Dataset(root = root, smiles2graph = smiles2graph)
+    pyg_dataset = PygPCQM4Mv2Dataset(root = root, smiles2graph = safe_smiles2graph)
 
     split_dict = pyg_dataset.get_idx_split()
     if use_kfold:

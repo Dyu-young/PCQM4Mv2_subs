@@ -31,18 +31,22 @@ def gnn_train(quick_run=False, logger=True, yaml_path='../yaml/gnn.yaml',
     train_dl, valid_dl, _, _, num_feas = get_dl(PATH,config,use_kfold=config.use_kfold,fold=args.fold,quick_run=quick_run)
     print(f'train: {len(train_dl)} valid: {len(valid_dl)}')
 
-    model = DGCN(MAX_NODE_FEA, num_feas, config)
+    # Calculate accumulation steps to reach effective batch size of 4096
+    effective_batch_size = 4096
+    accumulate_grad_batches = max(1, effective_batch_size // config.batch_size)
+    print(f'Effective batch size: {effective_batch_size}, Physical batch size: {config.batch_size}, Accumulation steps: {accumulate_grad_batches}')
+    
+    model = DGCN(MAX_NODE_FEA, num_feas, config, accumulate_grad_batches=accumulate_grad_batches)
 
     print('Start training:')
     EPOCHS = 1 if quick_run else config.epochs
     checkpoint_callback = pl.callbacks.ModelCheckpoint(monitor='valid_mae', mode='min')
     pcb = TQDMProgressBar(refresh_rate=20)
+    
     trainer = pl.Trainer(gpus=1, max_epochs=EPOCHS, 
                      callbacks=[checkpoint_callback,pcb],
                      logger=logger,
-                     precision=16,
-                     gradient_clip_val=config.gradient_clip_val,
-                     gradient_clip_algorithm="value"
+                     precision=32,
                     )
 
     trainer.fit(model, train_dataloaders=train_dl, 

@@ -8,16 +8,23 @@ from torch.nn import Dropout, Linear, ReLU
 import torch.nn.functional as F
 import torch
 import utils
+from muon import Muon
 
 class DGCN(pl.LightningModule):
 
-    def __init__(self, max_node_fea, num_feas, config):
+    def __init__(self, max_node_fea, num_feas, config, accumulate_grad_batches=1):
         super(DGCN, self).__init__()
+        
+        # Enable manual optimization to handle multiple optimizers correctly
+        self.automatic_optimization = False
 
         self.num_feas = num_feas
         self.lr = config.lr
         self.wd = config.wd
         self.epochs = config.epochs
+        
+        # Accumulation steps
+        self.acc_steps = accumulate_grad_batches
 
         # hidden layer node features
         self.hidden = config.H1
@@ -30,10 +37,12 @@ class DGCN(pl.LightningModule):
 
         act = None if config.act == 'None' else config.act
         act = eval(config.act)
-        self.l1 = Glayer(self.num_feas*self.En, H, heads, edge_dim=3, act=act, fill_value=1.0, beta=config.beta)
+        # self.l1 = Glayer(self.num_feas*self.En, H, heads, edge_dim=3, act=act, fill_value=1.0, beta=config.beta)
+        self.l1 = Glayer(self.num_feas*self.En, H, heads, edge_dim=3, beta=config.beta)
         ls = []
         for i in range(config.layers):
-            ls.append(DeepGCNLayer(Glayer(H*heads, H, heads, edge_dim=3, act=act, fill_value=1.0, beta=config.beta)))
+            # ls.append(DeepGCNLayer(Glayer(H*heads, H, heads, edge_dim=3, act=act, fill_value=1.0, beta=config.beta)))
+            ls.append(DeepGCNLayer(Glayer(H*heads, H, heads, edge_dim=3, beta=config.beta)))
         self.layers = torch.nn.ModuleList(ls)
         self.w = torch.nn.Sequential(Linear(H*heads, 4), ReLU(), Linear(4,1))
         self.out = torch.nn.Sequential(Linear(H*heads, 1),
@@ -46,12 +55,17 @@ class DGCN(pl.LightningModule):
         for i,l in enumerate(self.layers):
             x = l(x,edge_index,edge_attr.float()/4.0)
             x = F.relu(x)
-        #x = global_mean_pool(x, batch_index)
+        
+        # Numerical stable attention pooling
         a = self.w(x)
-        a = torch.exp(a)
+        # Subtract max for stability within each graph
+        from torch_scatter import scatter_max
+        a_max, _ = scatter_max(a, batch_index, dim=0)
+        a = torch.exp(a - a_max[batch_index])
+        
         x = global_add_pool(x*a, batch_index)
         a = global_add_pool(a, batch_index)
-        x = x/a
+        x = x/(a + 1e-8) # Avoid division by zero
         x1 = self.out(x)
         x2 = torch.clip(x1,YMIN,YMAX)
         x_out = (x1+x2)/2
@@ -70,10 +84,45 @@ class DGCN(pl.LightningModule):
         x_out = torch.clip(x_out,YMIN,YMAX)
         mae = F.l1_loss(x_out, batch.y)
         self.log(f"{tag}_mae", mae, batch_size = batch.y.shape[0], prog_bar=True)
+        self.log(f"{tag}_loss", loss, batch_size = batch.y.shape[0], prog_bar=True)
         return loss
 
     def training_step(self, batch, batch_index):
-        return self._loss(batch, batch_index, 'train')
+        # Manual optimization logic
+        opt_muon, opt_adam = self.optimizers()
+        
+        # Calculate loss
+        loss = self._loss(batch, batch_index, 'train')
+        
+        # Accumulation factor
+        # Scale loss for accumulation
+        loss = loss / self.acc_steps
+        
+        # Manual backward
+        self.manual_backward(loss)
+        
+        # Step optimizer every acc_steps
+        if (batch_index + 1) % self.acc_steps == 0:
+            # Gradient clipping (Using norm for better stability)
+            self.clip_gradients(opt_muon, gradient_clip_val=1.0, gradient_clip_algorithm="norm")
+            self.clip_gradients(opt_adam, gradient_clip_val=1.0, gradient_clip_algorithm="norm")
+
+            opt_muon.step()
+            opt_adam.step()
+            
+            opt_muon.zero_grad()
+            opt_adam.zero_grad()
+        
+        return loss
+
+    def on_train_epoch_end(self):
+        # Step schedulers at the end of epoch
+        sch_muon, sch_adam = self.lr_schedulers()
+        
+        # If the scheduler is based on epoch (like CosineAnnealingLR), step it here
+        # Note: Some schedulers might need metrics (ReduceLROnPlateau), CosineAnnealingLR does not.
+        sch_muon.step()
+        sch_adam.step()
 
     def validation_step(self, batch, batch_index):
         return self._loss(batch, batch_index, 'valid')
@@ -83,9 +132,29 @@ class DGCN(pl.LightningModule):
         return torch.clip(x_out,YMIN,YMAX)
 
     def configure_optimizers(self):
-        adam = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.wd)
-        slr = torch.optim.lr_scheduler.CosineAnnealingLR(adam, self.epochs)
-        return [adam], [slr]
+        # Filter parameters for Muon (>= 2D) and AdamW (< 2D or Embeddings)
+        muon_params = []
+        adamw_params = []
+        
+        for name, p in self.named_parameters():
+            if p.requires_grad:
+                if p.ndim >= 2 and 'emb' not in name:
+                    muon_params.append(p)
+                else:
+                    adamw_params.append(p)
+
+        muon_lr = 0.02 if self.lr < 0.01 else self.lr
+        
+        # Create optimizers
+        opt_muon = Muon(muon_params, lr=muon_lr, momentum=0.95)
+        opt_adam = torch.optim.AdamW(adamw_params, lr=self.lr, weight_decay=self.wd)
+        
+        # Create schedulers
+        sch_muon = torch.optim.lr_scheduler.CosineAnnealingLR(opt_muon, self.epochs)
+        sch_adam = torch.optim.lr_scheduler.CosineAnnealingLR(opt_adam, self.epochs)
+             
+        # Return as lists
+        return [opt_muon, opt_adam], [sch_muon, sch_adam]
 
 if __name__ == "__main__":
     config = utils.load_yaml('../yaml/gnn.yaml')
