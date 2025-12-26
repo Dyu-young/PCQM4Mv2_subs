@@ -4,7 +4,7 @@ from torch_geometric.nn import GCNConv, Sequential, global_add_pool, global_mean
 from torch_geometric.nn import GATv2Conv
 from torch_geometric.nn import TransformerConv as Glayer
 from constants import YMIN,YMAX
-from torch.nn import Dropout, Linear, ReLU
+from torch.nn import Dropout, Linear, ReLU, LayerNorm
 import torch.nn.functional as F
 import torch
 import utils
@@ -34,26 +34,41 @@ class DGCN(pl.LightningModule):
         self.emb = torch.nn.Embedding(self.max_node_fea, self.En)
         heads = config.heads
         H = self.hidden // heads
+        total_hidden = H * heads
 
         act = None if config.act == 'None' else config.act
         act = eval(config.act)
-        # self.l1 = Glayer(self.num_feas*self.En, H, heads, edge_dim=3, act=act, fill_value=1.0, beta=config.beta)
+        
+        # First layer
         self.l1 = Glayer(self.num_feas*self.En, H, heads, edge_dim=3, beta=config.beta)
+        self.ln1 = LayerNorm(total_hidden)
+        
+        # Deep layers
         ls = []
+        lns = []
         for i in range(config.layers):
-            # ls.append(DeepGCNLayer(Glayer(H*heads, H, heads, edge_dim=3, act=act, fill_value=1.0, beta=config.beta)))
-            ls.append(DeepGCNLayer(Glayer(H*heads, H, heads, edge_dim=3, beta=config.beta)))
+            ls.append(DeepGCNLayer(Glayer(total_hidden, H, heads, edge_dim=3, beta=config.beta)))
+            lns.append(LayerNorm(total_hidden))
+            
         self.layers = torch.nn.ModuleList(ls)
-        self.w = torch.nn.Sequential(Linear(H*heads, 4), ReLU(), Linear(4,1))
-        self.out = torch.nn.Sequential(Linear(H*heads, 1),
+        self.lns = torch.nn.ModuleList(lns)
+        
+        self.w = torch.nn.Sequential(Linear(total_hidden, 4), ReLU(), Linear(4,1))
+        self.out = torch.nn.Sequential(Linear(total_hidden, 1),
                                        Linear(1, 1))      
 
     def forward(self, x, edge_index, edge_attr, batch_index):
         x = self.emb(x).view(-1,self.num_feas*self.En)
+        
+        # First layer + LN
         x = self.l1(x,edge_index,edge_attr.float()/4.0)
+        x = self.ln1(x)
         x = F.relu(x)
-        for i,l in enumerate(self.layers):
+        
+        # Deep layers + LN
+        for i, (l, ln) in enumerate(zip(self.layers, self.lns)):
             x = l(x,edge_index,edge_attr.float()/4.0)
+            x = ln(x)
             x = F.relu(x)
         
         # Numerical stable attention pooling
@@ -103,9 +118,9 @@ class DGCN(pl.LightningModule):
         
         # Step optimizer every acc_steps
         if (batch_index + 1) % self.acc_steps == 0:
-            # Gradient clipping (Using norm for better stability)
-            self.clip_gradients(opt_muon, gradient_clip_val=1.0, gradient_clip_algorithm="norm")
-            self.clip_gradients(opt_adam, gradient_clip_val=1.0, gradient_clip_algorithm="norm")
+            # Gradient clipping (Tightened to 0.5)
+            self.clip_gradients(opt_muon, gradient_clip_val=0.5, gradient_clip_algorithm="norm")
+            self.clip_gradients(opt_adam, gradient_clip_val=0.5, gradient_clip_algorithm="norm")
 
             opt_muon.step()
             opt_adam.step()
@@ -143,7 +158,8 @@ class DGCN(pl.LightningModule):
                 else:
                     adamw_params.append(p)
 
-        muon_lr = 0.02 if self.lr < 0.01 else self.lr
+        # Lower Muon LR to 0.01 for better stability in deep networks
+        muon_lr = 0.01 if self.lr < 0.01 else self.lr
         
         # Create optimizers
         opt_muon = Muon(muon_params, lr=muon_lr, momentum=0.95)
