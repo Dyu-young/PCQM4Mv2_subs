@@ -66,10 +66,8 @@ class DGCN(pl.LightningModule):
         x = F.relu(x)
         
         # Deep layers + LN
-        for i, (l, ln) in enumerate(zip(self.layers, self.lns)):
-            x = l(x,edge_index,edge_attr.float()/4.0)
-            x = ln(x)
-            x = F.relu(x)
+        for i, l in enumerate(self.layers):
+            x = l(x, edge_index, edge_attr.float()/4.0)
         
         # Numerical stable attention pooling
         a = self.w(x)
