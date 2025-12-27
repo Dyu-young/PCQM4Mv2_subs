@@ -45,13 +45,16 @@ class DGCN(pl.LightningModule):
         
         # Deep layers
         ls = []
-        lns = []
         for i in range(config.layers):
-            ls.append(DeepGCNLayer(Glayer(total_hidden, H, heads, edge_dim=3, beta=config.beta)))
-            lns.append(LayerNorm(total_hidden))
+            ls.append(DeepGCNLayer(
+                conv=Glayer(total_hidden, H, heads, edge_dim=3, beta=config.beta),
+                norm=LayerNorm(total_hidden),
+                act=ReLU(),
+                block='res+',
+                dropout=config.dropout
+            ))
             
         self.layers = torch.nn.ModuleList(ls)
-        self.lns = torch.nn.ModuleList(lns)
         
         self.w = torch.nn.Sequential(Linear(total_hidden, 4), ReLU(), Linear(4,1))
         self.out = torch.nn.Sequential(Linear(total_hidden, 1),
@@ -65,7 +68,7 @@ class DGCN(pl.LightningModule):
         x = self.ln1(x)
         x = F.relu(x)
         
-        # Deep layers + LN
+        # Deep layers (Norm and Act handled internally by res+ block)
         for i, l in enumerate(self.layers):
             x = l(x, edge_index, edge_attr.float()/4.0)
         
